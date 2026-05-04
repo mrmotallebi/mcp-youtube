@@ -13,12 +13,12 @@
   "author": "Ani Betts <anais@anaisbetts.org>",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.6.0",
-    "rimraf": "^6.0.1",
-    "spawn-rx": "^4.0.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "rimraf": "^6.1.3",
+    "spawn-rx": "^6.0.1"
   },
   "devDependencies": {
-    "shx": "^0.3.4",
-    "bun-types": "latest"
+    "shx": "^0.4.0",
+    "bun-types": "^1.3.13"
   }
 }

@@ -10,12 +10,17 @@ import {
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnPromise } from "spawn-rx";
 import { rimraf } from "rimraf";
 
 const SUPPORTED_PROTOCOLS = new Set(["http:", "https:"]);
 const PREFERRED_SUBTITLE_LANGUAGE = "en";
-const FALLBACK_SUBTITLE_LANGUAGE = "all";
+
+interface RequestedSubtitle {
+  ext?: string;
+  url?: string;
+}
 
 const server = new Server(
   {
@@ -56,20 +61,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     const { url } = request.params.arguments as { url: string };
     const parsedUrl = parseSupportedUrl(url);
-
-    let content = "";
-    const tempDir = fs.mkdtempSync(`${os.tmpdir()}${path.sep}youtube-`);
-    try {
-      await downloadSubtitles(parsedUrl, tempDir);
-
-      listVttFiles(tempDir).forEach((file) => {
-        const fileContent = fs.readFileSync(path.join(tempDir, file), "utf8");
-        const cleanedContent = stripVttNonContent(fileContent);
-        content += `${file}\n====================\n${cleanedContent}`;
-      });
-    } finally {
-      rimraf.sync(tempDir);
-    }
+    const content = await downloadYoutubeSubtitles(parsedUrl);
 
     return {
       content: [
@@ -92,6 +84,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+export async function downloadYoutubeSubtitles(url: URL): Promise<string> {
+  let content = "";
+  const tempDir = fs.mkdtempSync(`${os.tmpdir()}${path.sep}youtube-`);
+  try {
+    await downloadSubtitles(url, tempDir);
+
+    listVttFiles(tempDir).forEach((file) => {
+      const fileContent = fs.readFileSync(path.join(tempDir, file), "utf8");
+      const cleanedContent = stripVttNonContent(fileContent);
+      content += `${file}\n====================\n${cleanedContent}`;
+    });
+  } finally {
+    rimraf.sync(tempDir);
+  }
+
+  return content;
+}
+
 export function buildYtDlpSubtitleArgs(url: URL, language: string): string[] {
   return [
     "--write-sub",
@@ -104,6 +114,47 @@ export function buildYtDlpSubtitleArgs(url: URL, language: string): string[] {
     "--",
     url.toString(),
   ];
+}
+
+export function buildYtDlpRequestedSubtitlesArgs(
+  url: URL,
+  language: string
+): string[] {
+  return [
+    "--print",
+    "%(requested_subtitles)j",
+    "--write-sub",
+    "--write-auto-sub",
+    "--sub-lang",
+    language,
+    "--skip-download",
+    "--sub-format",
+    "vtt",
+    "--",
+    url.toString(),
+  ];
+}
+
+export function buildYtDlpListSubtitlesArgs(url: URL): string[] {
+  return ["--list-subs", "--skip-download", "--", url.toString()];
+}
+
+export function parseAvailableSubtitleLanguages(output: string): string[] {
+  const languages: string[] = [];
+
+  output.split("\n").forEach((line) => {
+    const match = /^([A-Za-z][\w-]*)\s+.+\bvtt\b/.exec(line.trim());
+    if (!match) {
+      return;
+    }
+
+    const language = match[1];
+    if (!languages.includes(language)) {
+      languages.push(language);
+    }
+  });
+
+  return prioritizeSubtitleLanguages(languages);
 }
 
 export function parseSupportedUrl(url: string): URL {
@@ -177,6 +228,8 @@ async function runServer() {
 }
 
 async function downloadSubtitles(url: URL, tempDir: string): Promise<void> {
+  let lastError: unknown;
+
   try {
     await downloadSubtitlesForLanguage(
       url,
@@ -184,15 +237,34 @@ async function downloadSubtitles(url: URL, tempDir: string): Promise<void> {
       PREFERRED_SUBTITLE_LANGUAGE
     );
   } catch {
-    // A missing English caption track may surface as a yt-dlp failure; fall
-    // through to the availability check so other languages still get a chance.
+    lastError = new Error("Unable to download preferred subtitles");
   }
 
   if (listVttFiles(tempDir).length > 0) {
     return;
   }
 
-  await downloadSubtitlesForLanguage(url, tempDir, FALLBACK_SUBTITLE_LANGUAGE);
+  const fallbackLanguages = (
+    await listAvailableSubtitleLanguages(url)
+  ).filter((language) => language !== PREFERRED_SUBTITLE_LANGUAGE);
+
+  for (const language of fallbackLanguages) {
+    try {
+      await downloadSubtitlesForLanguage(url, tempDir, language);
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (listVttFiles(tempDir).length > 0) {
+      return;
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  throw new Error("No subtitles found");
 }
 
 async function downloadSubtitlesForLanguage(
@@ -200,10 +272,14 @@ async function downloadSubtitlesForLanguage(
   tempDir: string,
   language: string
 ): Promise<void> {
-  await spawnPromise("yt-dlp", buildYtDlpSubtitleArgs(url, language), {
-    cwd: tempDir,
-    detached: true,
-  });
+  try {
+    await spawnPromise("yt-dlp", buildYtDlpSubtitleArgs(url, language), {
+      cwd: tempDir,
+      detached: true,
+    });
+  } catch {
+    await downloadSubtitlesFromMetadata(url, tempDir, language);
+  }
 }
 
 function listVttFiles(tempDir: string): string[] {
@@ -213,4 +289,84 @@ function listVttFiles(tempDir: string): string[] {
     .sort();
 }
 
-runServer().catch(console.error);
+async function listAvailableSubtitleLanguages(url: URL): Promise<string[]> {
+  const output = await spawnPromise("yt-dlp", buildYtDlpListSubtitlesArgs(url), {
+    detached: true,
+  });
+
+  return parseAvailableSubtitleLanguages(output);
+}
+
+async function downloadSubtitlesFromMetadata(
+  url: URL,
+  tempDir: string,
+  language: string
+): Promise<void> {
+  const output = await spawnPromise(
+    "yt-dlp",
+    buildYtDlpRequestedSubtitlesArgs(url, language),
+    { detached: true }
+  );
+  const subtitles = parseRequestedSubtitles(output);
+
+  for (const [subtitleLanguage, subtitle] of Object.entries(subtitles)) {
+    if (!subtitle.url) {
+      continue;
+    }
+
+    const response = await fetch(subtitle.url);
+    if (!response.ok) {
+      throw new Error(
+        `Unable to download subtitles for ${subtitleLanguage}: ${response.status}`
+      );
+    }
+
+    const extension = subtitle.ext === "vtt" ? subtitle.ext : "vtt";
+    const fileName = `subtitle.${sanitizeFileName(subtitleLanguage)}.${extension}`;
+    fs.writeFileSync(path.join(tempDir, fileName), await response.text());
+  }
+
+  if (listVttFiles(tempDir).length === 0) {
+    throw new Error(`No VTT subtitles found for ${language}`);
+  }
+}
+
+function parseRequestedSubtitles(output: string): Record<string, RequestedSubtitle> {
+  const jsonLine = output
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("{"));
+
+  if (!jsonLine) {
+    return {};
+  }
+
+  return JSON.parse(jsonLine) as Record<string, RequestedSubtitle>;
+}
+
+function prioritizeSubtitleLanguages(languages: string[]): string[] {
+  const preferredLanguages = languages.filter(
+    (language) => language === PREFERRED_SUBTITLE_LANGUAGE
+  );
+  const originalLanguages = languages.filter((language) =>
+    language.endsWith("-orig")
+  );
+  const remainingLanguages = languages.filter(
+    (language) =>
+      language !== PREFERRED_SUBTITLE_LANGUAGE && !language.endsWith("-orig")
+  );
+
+  return [...preferredLanguages, ...originalLanguages, ...remainingLanguages];
+}
+
+function sanitizeFileName(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]/g, "_");
+}
+
+function isMainModule(): boolean {
+  return process.argv[1] === fileURLToPath(import.meta.url);
+}
+
+if (isMainModule()) {
+  runServer().catch(console.error);
+}

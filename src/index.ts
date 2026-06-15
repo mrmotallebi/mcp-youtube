@@ -14,6 +14,8 @@ import { spawnPromise } from "spawn-rx";
 import { rimraf } from "rimraf";
 
 const SUPPORTED_PROTOCOLS = new Set(["http:", "https:"]);
+const PREFERRED_SUBTITLE_LANGUAGE = "en";
+const FALLBACK_SUBTITLE_LANGUAGE = "all";
 
 const server = new Server(
   {
@@ -55,26 +57,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { url } = request.params.arguments as { url: string };
     const parsedUrl = parseSupportedUrl(url);
 
-    const tempDir = fs.mkdtempSync(`${os.tmpdir()}${path.sep}youtube-`);
-    await spawnPromise(
-      "yt-dlp",
-      [
-        "--write-sub",
-        "--write-auto-sub",
-        "--sub-lang",
-        "en",
-        "--skip-download",
-        "--sub-format",
-        "vtt",
-        "--",
-        parsedUrl.toString(),
-      ],
-      { cwd: tempDir, detached: true }
-    );
-
     let content = "";
+    const tempDir = fs.mkdtempSync(`${os.tmpdir()}${path.sep}youtube-`);
     try {
-      fs.readdirSync(tempDir).forEach((file) => {
+      await downloadSubtitles(parsedUrl, tempDir);
+
+      listVttFiles(tempDir).forEach((file) => {
         const fileContent = fs.readFileSync(path.join(tempDir, file), "utf8");
         const cleanedContent = stripVttNonContent(fileContent);
         content += `${file}\n====================\n${cleanedContent}`;
@@ -103,6 +91,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 });
+
+export function buildYtDlpSubtitleArgs(url: URL, language: string): string[] {
+  return [
+    "--write-sub",
+    "--write-auto-sub",
+    "--sub-lang",
+    language,
+    "--skip-download",
+    "--sub-format",
+    "vtt",
+    "--",
+    url.toString(),
+  ];
+}
 
 export function parseSupportedUrl(url: string): URL {
   const parsedUrl = URL.parse(url);
@@ -172,6 +174,43 @@ export function stripVttNonContent(vttContent: string): string {
 async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+async function downloadSubtitles(url: URL, tempDir: string): Promise<void> {
+  try {
+    await downloadSubtitlesForLanguage(
+      url,
+      tempDir,
+      PREFERRED_SUBTITLE_LANGUAGE
+    );
+  } catch {
+    // A missing English caption track may surface as a yt-dlp failure; fall
+    // through to the availability check so other languages still get a chance.
+  }
+
+  if (listVttFiles(tempDir).length > 0) {
+    return;
+  }
+
+  await downloadSubtitlesForLanguage(url, tempDir, FALLBACK_SUBTITLE_LANGUAGE);
+}
+
+async function downloadSubtitlesForLanguage(
+  url: URL,
+  tempDir: string,
+  language: string
+): Promise<void> {
+  await spawnPromise("yt-dlp", buildYtDlpSubtitleArgs(url, language), {
+    cwd: tempDir,
+    detached: true,
+  });
+}
+
+function listVttFiles(tempDir: string): string[] {
+  return fs
+    .readdirSync(tempDir)
+    .filter((file) => path.extname(file) === ".vtt")
+    .sort();
 }
 
 runServer().catch(console.error);

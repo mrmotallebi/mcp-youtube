@@ -2,11 +2,41 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
-import { parseSupportedUrl, stripVttNonContent } from "../src";
+import {
+  buildYtDlpSubtitleArgs,
+  parseSupportedUrl,
+  stripVttNonContent,
+} from "../src";
 import { describe, it, beforeAll, expect } from "bun:test";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const TEST_YOUTUBE_URL = new URL("https://www.youtube.com/watch?v=test");
+
+describe("buildYtDlpSubtitleArgs", () => {
+  it("should build English subtitle arguments", () => {
+    const args = buildYtDlpSubtitleArgs(TEST_YOUTUBE_URL, "en");
+    const subLangIndex = args.indexOf("--sub-lang");
+
+    expect(args[subLangIndex + 1]).toBe("en");
+  });
+
+  it("should build fallback subtitle arguments", () => {
+    const args = buildYtDlpSubtitleArgs(TEST_YOUTUBE_URL, "all");
+    const subLangIndex = args.indexOf("--sub-lang");
+
+    expect(args[subLangIndex + 1]).toBe("all");
+  });
+
+  it("should keep the URL after the option separator", () => {
+    const optionLikeUrl = new URL("https://www.youtube.com/watch?v=--version");
+    const args = buildYtDlpSubtitleArgs(optionLikeUrl, "all");
+    const separatorIndex = args.indexOf("--");
+
+    expect(separatorIndex).toBe(args.length - 2);
+    expect(args[separatorIndex + 1]).toBe(optionLikeUrl.toString());
+  });
+});
 
 describe("parseSupportedUrl", () => {
   it("should accept http and https URLs", () => {

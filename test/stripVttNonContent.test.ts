@@ -2,11 +2,34 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
-import { stripVttNonContent } from "../src";
+import { parseSupportedUrl, stripVttNonContent } from "../src";
 import { describe, it, beforeAll, expect } from "bun:test";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+describe("parseSupportedUrl", () => {
+  it("should accept http and https URLs", () => {
+    expect(parseSupportedUrl("https://www.youtube.com/watch?v=test").href).toBe(
+      "https://www.youtube.com/watch?v=test"
+    );
+    expect(parseSupportedUrl("http://example.com/video").href).toBe(
+      "http://example.com/video"
+    );
+  });
+
+  it("should reject option-like values", () => {
+    expect(() => parseSupportedUrl("--version")).toThrow(
+      "URL must be a valid http(s) URL"
+    );
+  });
+
+  it("should reject non-http URLs", () => {
+    expect(() => parseSupportedUrl("file:///etc/passwd")).toThrow(
+      "URL must be a valid http(s) URL"
+    );
+  });
+});
 
 describe("stripVttNonContent", () => {
   const fixturesDir = path.join(__dirname, "fixtures");

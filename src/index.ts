@@ -13,6 +13,8 @@ import path from "node:path";
 import { spawnPromise } from "spawn-rx";
 import { rimraf } from "rimraf";
 
+const SUPPORTED_PROTOCOLS = new Set(["http:", "https:"]);
+
 const server = new Server(
   {
     name: "mcp-youtube",
@@ -51,6 +53,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     const { url } = request.params.arguments as { url: string };
+    const parsedUrl = parseSupportedUrl(url);
 
     const tempDir = fs.mkdtempSync(`${os.tmpdir()}${path.sep}youtube-`);
     await spawnPromise(
@@ -63,7 +66,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         "--skip-download",
         "--sub-format",
         "vtt",
-        url,
+        "--",
+        parsedUrl.toString(),
       ],
       { cwd: tempDir, detached: true }
     );
@@ -87,18 +91,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         },
       ],
     };
-  } catch (err) {
+  } catch {
     return {
       content: [
         {
           type: "text",
-          text: `Error downloading video: ${err}`,
+          text: "Error downloading video",
         },
       ],
       isError: true,
     };
   }
 });
+
+export function parseSupportedUrl(url: string): URL {
+  const parsedUrl = URL.parse(url);
+
+  if (!parsedUrl || !SUPPORTED_PROTOCOLS.has(parsedUrl.protocol)) {
+    throw new Error("URL must be a valid http(s) URL");
+  }
+
+  return parsedUrl;
+}
 
 /**
  * Strips non-content elements from VTT subtitle files

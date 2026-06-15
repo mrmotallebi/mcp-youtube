@@ -2,7 +2,7 @@
   "name": "@anaisbetts/mcp-youtube",
   "version": "0.7.0",
   "bin": {
-    "mcp-youtube": "lib/index.mjs"
+    "mcp-youtube": "dist/index.js"
   },
   "description": "YouTube downloader for MCP",
   "main": "dist/index.js",

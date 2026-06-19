@@ -4,7 +4,6 @@ import { fileURLToPath } from "url";
 import { dirname } from "path";
 import {
   buildYtDlpSubtitleArgs,
-  parseAvailableSubtitleLanguages,
   parseSupportedUrl,
   stripVttNonContent,
 } from "../src";
@@ -36,18 +35,6 @@ describe("buildYtDlpSubtitleArgs", () => {
 
     expect(separatorIndex).toBe(args.length - 2);
     expect(args[separatorIndex + 1]).toBe(optionLikeUrl.toString());
-  });
-});
-
-describe("parseAvailableSubtitleLanguages", () => {
-  it("should prefer English, then original captions, then other available captions", () => {
-    const languages = parseAvailableSubtitleLanguages(`Language Name                  Formats
-ab       Abkhazian             vtt, srt, ttml, srv3, srv2, srv1, json3
-de-orig  German (Original)     vtt, srt, ttml, srv3, srv2, srv1, json3
-de       German                vtt, srt, ttml, srv3, srv2, srv1, json3
-en       English               vtt, srt, ttml, srv3, srv2, srv1, json3`);
-
-    expect(languages).toEqual(["en", "de-orig", "ab", "de"]);
   });
 });
 

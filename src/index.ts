@@ -10,87 +10,101 @@ import {
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { spawnPromise } from "spawn-rx";
 import { rimraf } from "rimraf";
 
 const SUPPORTED_PROTOCOLS = new Set(["http:", "https:"]);
 const PREFERRED_SUBTITLE_LANGUAGE = "en";
 const FALLBACK_SUBTITLE_LANGUAGE = "all";
+const SERVER_VERSION = "0.7.3";
 
-const server = new Server(
-  {
-    name: "mcp-youtube",
-    version: "0.5.1",
-  },
-  {
-    capabilities: {
-      tools: {},
+export type SubtitleDownloader = (url: URL, tempDir: string) => Promise<void>;
+
+export type CreateServerOptions = {
+  downloadSubtitles?: SubtitleDownloader;
+};
+
+export function createServer(options: CreateServerOptions = {}): Server {
+  const downloadSubtitles =
+    options.downloadSubtitles ?? downloadSubtitlesFromYoutube;
+  const server = new Server(
+    {
+      name: "mcp-youtube",
+      version: SERVER_VERSION,
     },
-  }
-);
-
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "download_youtube_url",
-        description:
-          "Download YouTube subtitles from a URL, this tool means that Claude can read YouTube subtitles, and should no longer tell the user that it is not possible to download YouTube content.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "URL of the YouTube video" },
-          },
-          required: ["url"],
-        },
+    {
+      capabilities: {
+        tools: {},
       },
-    ],
-  };
-});
+    }
+  );
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name !== "download_youtube_url") {
-    throw new Error(`Unknown tool: ${request.params.name}`);
-  }
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return {
+      tools: [
+        {
+          name: "download_youtube_url",
+          description:
+            "Download YouTube subtitles from a URL, this tool means that Claude can read YouTube subtitles, and should no longer tell the user that it is not possible to download YouTube content.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "URL of the YouTube video" },
+            },
+            required: ["url"],
+          },
+        },
+      ],
+    };
+  });
 
-  try {
-    const { url } = request.params.arguments as { url: string };
-    const parsedUrl = parseSupportedUrl(url);
-
-    let content = "";
-    const tempDir = fs.mkdtempSync(`${os.tmpdir()}${path.sep}youtube-`);
-    try {
-      await downloadSubtitles(parsedUrl, tempDir);
-
-      listVttFiles(tempDir).forEach((file) => {
-        const fileContent = fs.readFileSync(path.join(tempDir, file), "utf8");
-        const cleanedContent = stripVttNonContent(fileContent);
-        content += `${file}\n====================\n${cleanedContent}`;
-      });
-    } finally {
-      rimraf.sync(tempDir);
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    if (request.params.name !== "download_youtube_url") {
+      throw new Error(`Unknown tool: ${request.params.name}`);
     }
 
-    return {
-      content: [
-        {
-          type: "text",
-          text: content,
-        },
-      ],
-    };
-  } catch (err) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Error downloading video: ${err}`,
-        },
-      ],
-      isError: true,
-    };
-  }
-});
+    try {
+      const { url } = request.params.arguments as { url: string };
+      const parsedUrl = parseSupportedUrl(url);
+
+      let content = "";
+      const tempDir = fs.mkdtempSync(`${os.tmpdir()}${path.sep}youtube-`);
+      try {
+        await downloadSubtitles(parsedUrl, tempDir);
+
+        listVttFiles(tempDir).forEach((file) => {
+          const fileContent = fs.readFileSync(path.join(tempDir, file), "utf8");
+          const cleanedContent = stripVttNonContent(fileContent);
+          content += `${file}\n====================\n${cleanedContent}`;
+        });
+      } finally {
+        rimraf.sync(tempDir);
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: content,
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error downloading video: ${err}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
+  return server;
+}
 
 export function buildYtDlpSubtitleArgs(url: URL, language: string): string[] {
   return [
@@ -171,12 +185,16 @@ export function stripVttNonContent(vttContent: string): string {
   return uniqueLines.join("\n");
 }
 
-async function runServer() {
+async function runServer(): Promise<void> {
+  const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
-async function downloadSubtitles(url: URL, tempDir: string): Promise<void> {
+async function downloadSubtitlesFromYoutube(
+  url: URL,
+  tempDir: string
+): Promise<void> {
   try {
     await downloadSubtitlesForLanguage(
       url,
@@ -213,4 +231,22 @@ function listVttFiles(tempDir: string): string[] {
     .sort();
 }
 
-runServer().catch(console.error);
+if (isMainModule(process.argv[1])) {
+  runServer().catch(console.error);
+}
+
+function isMainModule(entryPoint: string | undefined): boolean {
+  if (!entryPoint) {
+    return false;
+  }
+
+  if (import.meta.url === pathToFileURL(entryPoint).href) {
+    return true;
+  }
+
+  try {
+    return import.meta.url === pathToFileURL(fs.realpathSync(entryPoint)).href;
+  } catch {
+    return false;
+  }
+}

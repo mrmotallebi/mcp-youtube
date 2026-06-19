@@ -58,11 +58,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     throw new Error(`Unknown tool: ${request.params.name}`);
   }
 
-  try {
-    const { url } = request.params.arguments as { url: string };
-    const parsedUrl = parseSupportedUrl(url);
-    const content = await downloadYoutubeSubtitles(parsedUrl);
+  const url = getUrlArgument(request.params.arguments);
+  if (!url) {
+    return textErrorResponse(
+      "Parameters are formatted incorrectly: expected a string url argument"
+    );
+  }
 
+  let parsedUrl: URL;
+  try {
+    parsedUrl = parseSupportedUrl(url);
+  } catch (error) {
+    return textErrorResponse(
+      `Parameters are formatted incorrectly: ${formatErrorReason(error)}`
+    );
+  }
+
+  try {
+    const content = await downloadYoutubeSubtitles(parsedUrl);
     return {
       content: [
         {
@@ -71,16 +84,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         },
       ],
     };
-  } catch {
-    return {
-      content: [
-        {
-          type: "text",
-          text: "Error downloading video",
-        },
-      ],
-      isError: true,
-    };
+  } catch (error) {
+    return textErrorResponse(
+      `Error downloading video: ${formatErrorReason(error)}`
+    );
   }
 });
 
@@ -236,8 +243,10 @@ async function downloadSubtitles(url: URL, tempDir: string): Promise<void> {
       tempDir,
       PREFERRED_SUBTITLE_LANGUAGE
     );
-  } catch {
-    lastError = new Error("Unable to download preferred subtitles");
+  } catch (error) {
+    lastError = new Error(
+      `Unable to download preferred subtitles: ${formatErrorReason(error)}`
+    );
   }
 
   if (listVttFiles(tempDir).length > 0) {
@@ -365,6 +374,43 @@ function sanitizeFileName(value: string): string {
 
 function isMainModule(): boolean {
   return process.argv[1] === fileURLToPath(import.meta.url);
+}
+
+function getUrlArgument(arguments_: unknown): string | undefined {
+  if (
+    !arguments_ ||
+    typeof arguments_ !== "object" ||
+    !("url" in arguments_) ||
+    typeof arguments_.url !== "string"
+  ) {
+    return undefined;
+  }
+
+  return arguments_.url;
+}
+
+function textErrorResponse(text: string) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text,
+      },
+    ],
+    isError: true,
+  };
+}
+
+function formatErrorReason(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return "unknown error";
 }
 
 if (isMainModule()) {

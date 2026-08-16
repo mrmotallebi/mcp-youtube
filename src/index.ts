@@ -13,9 +13,11 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnPromise } from "spawn-rx";
 import { rimraf } from "rimraf";
+import { parseSync } from "subtitle";
 
 const SUPPORTED_PROTOCOLS = new Set(["http:", "https:"]);
 const DEFAULT_SUBTITLE_LANGUAGES = ["en"];
+const VTT_TAG = /<[^>]+>/g;
 
 interface RequestedSubtitle {
   ext?: string;
@@ -242,61 +244,6 @@ export function parseSupportedUrl(url: string): URL {
   return parsedUrl;
 }
 
-/**
- * Strips non-content elements from VTT subtitle files
- */
-export function stripVttNonContent(vttContent: string): string {
-  if (!vttContent || vttContent.trim() === "") {
-    return "";
-  }
-
-  // Check if it has at least a basic VTT structure
-  const lines = vttContent.split("\n");
-  if (lines.length < 4 || !lines[0].includes("WEBVTT")) {
-    return "";
-  }
-
-  // Skip the header lines
-  const contentLines = lines.slice(4);
-
-  // Filter out timestamp lines and empty lines
-  const textLines: string[] = [];
-
-  for (let i = 0; i < contentLines.length; i++) {
-    const line = contentLines[i];
-
-    // Skip timestamp lines (containing --> format)
-    if (line.includes("-->")) continue;
-
-    // Skip positioning metadata lines
-    if (line.includes("align:") || line.includes("position:")) continue;
-
-    // Skip empty lines
-    if (line.trim() === "") continue;
-
-    // Clean up the line by removing timestamp tags like <00:00:07.759>
-    const cleanedLine = line
-      .replace(/<\d{2}:\d{2}:\d{2}\.\d{3}>|<\/c>/g, "")
-      .replace(/<c>/g, "");
-
-    if (cleanedLine.trim() !== "") {
-      textLines.push(cleanedLine.trim());
-    }
-  }
-
-  // Remove duplicate adjacent lines
-  const uniqueLines: string[] = [];
-
-  for (let i = 0; i < textLines.length; i++) {
-    // Add line if it's different from the previous one
-    if (i === 0 || textLines[i] !== textLines[i - 1]) {
-      uniqueLines.push(textLines[i]);
-    }
-  }
-
-  return uniqueLines.join("\n");
-}
-
 async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -495,6 +442,33 @@ function formatErrorReason(error: unknown): string {
   }
 
   return "unknown error";
+}
+
+export function stripVttNonContent(vttContent: string): string {
+  if (!vttContent || vttContent.trim() === "") {
+    return "";
+  }
+
+  try {
+    return dedupeAdjacent(
+      parseSync(vttContent).flatMap((node) =>
+        node.type === "cue" ? cueTextLines(node.data.text) : []
+      )
+    ).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+function cueTextLines(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.replace(VTT_TAG, "").trim())
+    .filter((line) => line.length > 0);
+}
+
+function dedupeAdjacent(lines: string[]): string[] {
+  return lines.filter((line, index) => index === 0 || line !== lines[index - 1]);
 }
 
 if (isMainModule(process.argv[1])) {

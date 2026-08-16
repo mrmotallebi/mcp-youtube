@@ -10,7 +10,7 @@ import {
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import { spawnPromise } from "spawn-rx";
 import { rimraf } from "rimraf";
 
@@ -457,8 +457,20 @@ function sanitizeFileName(value: string): string {
   return value.replace(/[^A-Za-z0-9_.-]/g, "_");
 }
 
-function isMainModule(): boolean {
-  return process.argv[1] === fileURLToPath(import.meta.url);
+function isMainModule(entryPoint: string | undefined): boolean {
+  if (!entryPoint) {
+    return false;
+  }
+
+  if (import.meta.url === pathToFileURL(entryPoint).href) {
+    return true;
+  }
+
+  try {
+    return import.meta.url === pathToFileURL(fs.realpathSync(entryPoint)).href;
+  } catch {
+    return false;
+  }
 }
 
 function textErrorResponse(text: string) {
@@ -485,6 +497,6 @@ function formatErrorReason(error: unknown): string {
   return "unknown error";
 }
 
-if (isMainModule()) {
+if (isMainModule(process.argv[1])) {
   runServer().catch(console.error);
 }

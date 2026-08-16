@@ -4,7 +4,10 @@ import { fileURLToPath } from "url";
 import { dirname } from "path";
 import {
   buildYtDlpSubtitleArgs,
+  isAcceptedSubtitleLanguage,
+  normalizeSubtitleLanguages,
   parseAvailableSubtitleLanguages,
+  parseDownloadYoutubeUrlArguments,
   parseSupportedUrl,
   stripVttNonContent,
 } from "../src";
@@ -40,14 +43,93 @@ describe("buildYtDlpSubtitleArgs", () => {
 });
 
 describe("parseAvailableSubtitleLanguages", () => {
-  it("should prefer English, then original captions, then other available captions", () => {
-    const languages = parseAvailableSubtitleLanguages(`Language Name                  Formats
+  const listSubsOutput = `Language Name                  Formats
 ab       Abkhazian             vtt, srt, ttml, srv3, srv2, srv1, json3
 de-orig  German (Original)     vtt, srt, ttml, srv3, srv2, srv1, json3
 de       German                vtt, srt, ttml, srv3, srv2, srv1, json3
-en       English               vtt, srt, ttml, srv3, srv2, srv1, json3`);
+en       English               vtt, srt, ttml, srv3, srv2, srv1, json3
+en-orig  English (Original)    vtt, srt, ttml, srv3, srv2, srv1, json3`;
 
-    expect(languages).toEqual(["en", "de-orig", "ab", "de"]);
+  it("should default to English-only languages", () => {
+    expect(parseAvailableSubtitleLanguages(listSubsOutput)).toEqual([
+      "en",
+      "en-orig",
+    ]);
+  });
+
+  it("should ignore languages outside the accepted list", () => {
+    expect(
+      parseAvailableSubtitleLanguages(listSubsOutput, ["de", "ab"])
+    ).toEqual(["de", "ab", "de-orig"]);
+  });
+
+  it("should prefer exact accepted languages, then original captions", () => {
+    expect(
+      parseAvailableSubtitleLanguages(listSubsOutput, ["en", "de"])
+    ).toEqual(["en", "de", "de-orig", "en-orig"]);
+  });
+});
+
+describe("normalizeSubtitleLanguages", () => {
+  it("should default empty input to English", () => {
+    expect(normalizeSubtitleLanguages([])).toEqual(["en"]);
+  });
+
+  it("should trim, drop blanks, and dedupe", () => {
+    expect(normalizeSubtitleLanguages([" en ", "", "es", "en"])).toEqual([
+      "en",
+      "es",
+    ]);
+  });
+});
+
+describe("isAcceptedSubtitleLanguage", () => {
+  it("should accept exact matches and regional variants", () => {
+    expect(isAcceptedSubtitleLanguage("en", ["en"])).toBe(true);
+    expect(isAcceptedSubtitleLanguage("en-US", ["en"])).toBe(true);
+    expect(isAcceptedSubtitleLanguage("en-orig", ["en"])).toBe(true);
+    expect(isAcceptedSubtitleLanguage("de", ["en"])).toBe(false);
+  });
+});
+
+describe("parseDownloadYoutubeUrlArguments", () => {
+  it("should default languages to English when omitted", () => {
+    expect(
+      parseDownloadYoutubeUrlArguments({
+        url: "https://www.youtube.com/watch?v=test",
+      })
+    ).toEqual({
+      url: "https://www.youtube.com/watch?v=test",
+      languages: ["en"],
+    });
+  });
+
+  it("should accept an explicit languages list", () => {
+    expect(
+      parseDownloadYoutubeUrlArguments({
+        url: "https://www.youtube.com/watch?v=test",
+        languages: ["es", "fr"],
+      })
+    ).toEqual({
+      url: "https://www.youtube.com/watch?v=test",
+      languages: ["es", "fr"],
+    });
+  });
+
+  it("should reject invalid languages values", () => {
+    expect(() =>
+      parseDownloadYoutubeUrlArguments({
+        url: "https://www.youtube.com/watch?v=test",
+        languages: "en",
+      })
+    ).toThrow("languages must be an array of language codes");
+
+    expect(() =>
+      parseDownloadYoutubeUrlArguments({
+        url: "https://www.youtube.com/watch?v=test",
+        languages: [""],
+      })
+    ).toThrow("languages must be an array of non-empty strings");
   });
 });
 

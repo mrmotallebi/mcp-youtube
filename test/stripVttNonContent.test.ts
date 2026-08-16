@@ -51,22 +51,19 @@ en       English               vtt, srt, ttml, srv3, srv2, srv1, json3
 en-orig  English (Original)    vtt, srt, ttml, srv3, srv2, srv1, json3`;
 
   it("should default to English-only languages", () => {
-    expect(parseAvailableSubtitleLanguages(listSubsOutput)).toEqual([
-      "en",
-      "en-orig",
-    ]);
+    expect(parseAvailableSubtitleLanguages(listSubsOutput)).toEqual(["en"]);
   });
 
   it("should ignore languages outside the accepted list", () => {
     expect(
       parseAvailableSubtitleLanguages(listSubsOutput, ["de", "ab"])
-    ).toEqual(["de", "ab", "de-orig"]);
+    ).toEqual(["de", "ab"]);
   });
 
-  it("should prefer exact accepted languages, then original captions", () => {
+  it("should preserve accepted language order", () => {
     expect(
-      parseAvailableSubtitleLanguages(listSubsOutput, ["en", "de"])
-    ).toEqual(["en", "de", "de-orig", "en-orig"]);
+      parseAvailableSubtitleLanguages(listSubsOutput, ["en", "de", "missing"])
+    ).toEqual(["en", "de"]);
   });
 });
 
@@ -84,10 +81,10 @@ describe("normalizeSubtitleLanguages", () => {
 });
 
 describe("isAcceptedSubtitleLanguage", () => {
-  it("should accept exact matches and regional variants", () => {
+  it("should accept only exact language codes from the list", () => {
     expect(isAcceptedSubtitleLanguage("en", ["en"])).toBe(true);
-    expect(isAcceptedSubtitleLanguage("en-US", ["en"])).toBe(true);
-    expect(isAcceptedSubtitleLanguage("en-orig", ["en"])).toBe(true);
+    expect(isAcceptedSubtitleLanguage("en-US", ["en"])).toBe(false);
+    expect(isAcceptedSubtitleLanguage("en-orig", ["en"])).toBe(false);
     expect(isAcceptedSubtitleLanguage("de", ["en"])).toBe(false);
   });
 });

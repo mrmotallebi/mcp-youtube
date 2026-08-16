@@ -145,9 +145,7 @@ export function isAcceptedSubtitleLanguage(
   language: string,
   acceptedLanguages: string[]
 ): boolean {
-  return acceptedLanguages.some(
-    (accepted) => language === accepted || language.startsWith(`${accepted}-`)
-  );
+  return acceptedLanguages.includes(language);
 }
 
 export function parseDownloadYoutubeUrlArguments(
@@ -323,33 +321,14 @@ async function downloadSubtitles(
   languages: string[]
 ): Promise<void> {
   let lastError: unknown;
-  const attemptedLanguages = new Set<string>();
 
   for (const language of languages) {
-    attemptedLanguages.add(language);
-
     try {
       await downloadSubtitlesForLanguage(url, tempDir, language, languages);
     } catch (error) {
       lastError = new Error(
         `Unable to download subtitles for ${language}: ${formatErrorReason(error)}`
       );
-    }
-
-    if (listVttFiles(tempDir).length > 0) {
-      return;
-    }
-  }
-
-  const fallbackLanguages = (
-    await listAvailableSubtitleLanguages(url, languages)
-  ).filter((language) => !attemptedLanguages.has(language));
-
-  for (const language of fallbackLanguages) {
-    try {
-      await downloadSubtitlesForLanguage(url, tempDir, language, languages);
-    } catch (error) {
-      lastError = error;
     }
 
     if (listVttFiles(tempDir).length > 0) {
@@ -390,17 +369,6 @@ function listVttFiles(tempDir: string): string[] {
     .readdirSync(tempDir)
     .filter((file) => path.extname(file) === ".vtt")
     .sort();
-}
-
-async function listAvailableSubtitleLanguages(
-  url: URL,
-  acceptedLanguages: string[]
-): Promise<string[]> {
-  const output = await spawnPromise("yt-dlp", buildYtDlpListSubtitlesArgs(url), {
-    detached: true,
-  });
-
-  return parseAvailableSubtitleLanguages(output, acceptedLanguages);
 }
 
 async function downloadSubtitlesFromMetadata(
@@ -458,19 +426,7 @@ function prioritizeSubtitleLanguages(
   languages: string[],
   acceptedLanguages: string[]
 ): string[] {
-  const preferredLanguages = acceptedLanguages.filter((language) =>
-    languages.includes(language)
-  );
-  const originalLanguages = languages.filter(
-    (language) =>
-      language.endsWith("-orig") && !acceptedLanguages.includes(language)
-  );
-  const remainingLanguages = languages.filter(
-    (language) =>
-      !acceptedLanguages.includes(language) && !language.endsWith("-orig")
-  );
-
-  return [...preferredLanguages, ...originalLanguages, ...remainingLanguages];
+  return acceptedLanguages.filter((language) => languages.includes(language));
 }
 
 function sanitizeFileName(value: string): string {

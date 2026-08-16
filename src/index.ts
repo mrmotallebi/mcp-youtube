@@ -69,29 +69,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     throw new Error(`Unknown tool: ${request.params.name}`);
   }
 
-  let toolArguments: DownloadYoutubeUrlArguments;
   try {
-    toolArguments = parseDownloadYoutubeUrlArguments(request.params.arguments);
-  } catch (error) {
-    return textErrorResponse(
-      `Parameters are formatted incorrectly: ${formatErrorReason(error)}`
+    const toolArguments = parseDownloadYoutubeUrlArguments(
+      request.params.arguments
     );
-  }
-
-  let parsedUrl: URL;
-  try {
-    parsedUrl = parseSupportedUrl(toolArguments.url);
-  } catch (error) {
-    return textErrorResponse(
-      `Parameters are formatted incorrectly: ${formatErrorReason(error)}`
-    );
-  }
-
-  try {
+    const parsedUrl = parseSupportedUrl(toolArguments.url);
     const content = await downloadYoutubeSubtitles(
       parsedUrl,
       toolArguments.languages
     );
+
     return {
       content: [
         {
@@ -101,9 +88,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ],
     };
   } catch (error) {
-    return textErrorResponse(
-      `Error downloading video: ${formatErrorReason(error)}`
-    );
+    return textErrorResponse(formatErrorReason(error));
   }
 });
 
@@ -331,9 +316,7 @@ async function downloadSubtitles(
     try {
       await downloadSubtitlesForLanguage(url, tempDir, language, languages);
     } catch (error) {
-      lastError = new Error(
-        `Unable to download subtitles for ${language}: ${formatErrorReason(error)}`
-      );
+      lastError = error;
     }
 
     if (listVttFiles(tempDir).length > 0) {

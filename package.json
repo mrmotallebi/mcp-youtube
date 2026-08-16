@@ -7,7 +7,7 @@
   "description": "YouTube downloader for MCP",
   "main": "dist/index.js",
   "scripts": {
-    "prepublish": "git clean -xdf dist && bun build --target node src/index.ts --outdir dist",
+    "prepare": "git clean -xdf dist && bun build --target node src/index.ts --outdir dist",
     "test": "bun test"
   },
   "author": "Ani Betts <anais@anaisbetts.org>",

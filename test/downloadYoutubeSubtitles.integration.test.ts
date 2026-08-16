@@ -8,7 +8,8 @@ describe("downloadYoutubeSubtitles integration", () => {
     "should download subtitles from the requested YouTube video",
     async () => {
       const content = await downloadYoutubeSubtitles(
-        parseSupportedUrl(INTEGRATION_TEST_URL)
+        parseSupportedUrl(INTEGRATION_TEST_URL),
+        ["en"]
       );
 
       expect(content.length).toBeGreaterThan(0);

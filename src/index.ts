@@ -10,100 +10,180 @@ import {
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { spawnPromise } from "spawn-rx";
 import { rimraf } from "rimraf";
 
 const SUPPORTED_PROTOCOLS = new Set(["http:", "https:"]);
-const PREFERRED_SUBTITLE_LANGUAGE = "en";
-const FALLBACK_SUBTITLE_LANGUAGE = "all";
-const SERVER_VERSION = "0.7.3";
+const DEFAULT_SUBTITLE_LANGUAGES = ["en"];
 
-export type SubtitleDownloader = (url: URL, tempDir: string) => Promise<void>;
+interface RequestedSubtitle {
+  ext?: string;
+  url?: string;
+}
 
-export type CreateServerOptions = {
-  downloadSubtitles?: SubtitleDownloader;
-};
+interface DownloadYoutubeUrlArguments {
+  url: string;
+  languages: string[];
+}
 
-export function createServer(options: CreateServerOptions = {}): Server {
-  const downloadSubtitles =
-    options.downloadSubtitles ?? downloadSubtitlesFromYoutube;
-  const server = new Server(
-    {
-      name: "mcp-youtube",
-      version: SERVER_VERSION,
+const server = new Server(
+  {
+    name: "mcp-youtube",
+    version: "0.5.1",
+  },
+  {
+    capabilities: {
+      tools: {},
     },
-    {
-      capabilities: {
-        tools: {},
-      },
-    }
-  );
+  }
+);
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-      tools: [
-        {
-          name: "download_youtube_url",
-          description:
-            "Download YouTube subtitles from a URL, this tool means that Claude can read YouTube subtitles, and should no longer tell the user that it is not possible to download YouTube content.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              url: { type: "string", description: "URL of the YouTube video" },
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return {
+    tools: [
+      {
+        name: "download_youtube_url",
+        description:
+          "Download YouTube subtitles from a URL, this tool means that Claude can read YouTube subtitles, and should no longer tell the user that it is not possible to download YouTube content.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string", description: "URL of the YouTube video" },
+            languages: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                'Accepted subtitle language codes (e.g. ["en", "es"]). Languages not in this list are ignored. Defaults to ["en"].',
             },
-            required: ["url"],
           },
+          required: ["url"],
+        },
+      },
+    ],
+  };
+});
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  if (request.params.name !== "download_youtube_url") {
+    throw new Error(`Unknown tool: ${request.params.name}`);
+  }
+
+  let toolArguments: DownloadYoutubeUrlArguments;
+  try {
+    toolArguments = parseDownloadYoutubeUrlArguments(request.params.arguments);
+  } catch (error) {
+    return textErrorResponse(
+      `Parameters are formatted incorrectly: ${formatErrorReason(error)}`
+    );
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = parseSupportedUrl(toolArguments.url);
+  } catch (error) {
+    return textErrorResponse(
+      `Parameters are formatted incorrectly: ${formatErrorReason(error)}`
+    );
+  }
+
+  try {
+    const content = await downloadYoutubeSubtitles(
+      parsedUrl,
+      toolArguments.languages
+    );
+    return {
+      content: [
+        {
+          type: "text",
+          text: content,
         },
       ],
     };
-  });
+  } catch (error) {
+    return textErrorResponse(
+      `Error downloading video: ${formatErrorReason(error)}`
+    );
+  }
+});
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    if (request.params.name !== "download_youtube_url") {
-      throw new Error(`Unknown tool: ${request.params.name}`);
-    }
+export async function downloadYoutubeSubtitles(
+  url: URL,
+  languages: string[] = DEFAULT_SUBTITLE_LANGUAGES
+): Promise<string> {
+  const acceptedLanguages = normalizeSubtitleLanguages(languages);
+  let content = "";
+  const tempDir = fs.mkdtempSync(`${os.tmpdir()}${path.sep}youtube-`);
+  try {
+    await downloadSubtitles(url, tempDir, acceptedLanguages);
 
-    try {
-      const { url } = request.params.arguments as { url: string };
-      const parsedUrl = parseSupportedUrl(url);
+    listVttFiles(tempDir).forEach((file) => {
+      const fileContent = fs.readFileSync(path.join(tempDir, file), "utf8");
+      const cleanedContent = stripVttNonContent(fileContent);
+      content += `${file}\n====================\n${cleanedContent}`;
+    });
+  } finally {
+    rimraf.sync(tempDir);
+  }
 
-      let content = "";
-      const tempDir = fs.mkdtempSync(`${os.tmpdir()}${path.sep}youtube-`);
-      try {
-        await downloadSubtitles(parsedUrl, tempDir);
+  return content;
+}
 
-        listVttFiles(tempDir).forEach((file) => {
-          const fileContent = fs.readFileSync(path.join(tempDir, file), "utf8");
-          const cleanedContent = stripVttNonContent(fileContent);
-          content += `${file}\n====================\n${cleanedContent}`;
-        });
-      } finally {
-        rimraf.sync(tempDir);
-      }
+export function normalizeSubtitleLanguages(languages: string[]): string[] {
+  const normalized = languages
+    .map((language) => language.trim())
+    .filter((language) => language.length > 0);
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: content,
-          },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error downloading video: ${err}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  });
+  if (normalized.length === 0) {
+    return [...DEFAULT_SUBTITLE_LANGUAGES];
+  }
 
-  return server;
+  return [...new Set(normalized)];
+}
+
+export function isAcceptedSubtitleLanguage(
+  language: string,
+  acceptedLanguages: string[]
+): boolean {
+  return acceptedLanguages.some(
+    (accepted) => language === accepted || language.startsWith(`${accepted}-`)
+  );
+}
+
+export function parseDownloadYoutubeUrlArguments(
+  arguments_: unknown
+): DownloadYoutubeUrlArguments {
+  if (!arguments_ || typeof arguments_ !== "object") {
+    throw new Error("expected a string url argument");
+  }
+
+  if (!("url" in arguments_) || typeof arguments_.url !== "string") {
+    throw new Error("expected a string url argument");
+  }
+
+  if (!("languages" in arguments_) || arguments_.languages === undefined) {
+    return {
+      url: arguments_.url,
+      languages: [...DEFAULT_SUBTITLE_LANGUAGES],
+    };
+  }
+
+  if (!Array.isArray(arguments_.languages)) {
+    throw new Error("languages must be an array of language codes");
+  }
+
+  if (
+    arguments_.languages.some(
+      (language) => typeof language !== "string" || language.trim() === ""
+    )
+  ) {
+    throw new Error("languages must be an array of non-empty strings");
+  }
+
+  return {
+    url: arguments_.url,
+    languages: normalizeSubtitleLanguages(arguments_.languages),
+  };
 }
 
 export function buildYtDlpSubtitleArgs(url: URL, language: string): string[] {
@@ -118,6 +198,53 @@ export function buildYtDlpSubtitleArgs(url: URL, language: string): string[] {
     "--",
     url.toString(),
   ];
+}
+
+export function buildYtDlpRequestedSubtitlesArgs(
+  url: URL,
+  language: string
+): string[] {
+  return [
+    "--print",
+    "%(requested_subtitles)j",
+    "--write-sub",
+    "--write-auto-sub",
+    "--sub-lang",
+    language,
+    "--skip-download",
+    "--sub-format",
+    "vtt",
+    "--",
+    url.toString(),
+  ];
+}
+
+export function buildYtDlpListSubtitlesArgs(url: URL): string[] {
+  return ["--list-subs", "--skip-download", "--", url.toString()];
+}
+
+export function parseAvailableSubtitleLanguages(
+  output: string,
+  acceptedLanguages: string[] = DEFAULT_SUBTITLE_LANGUAGES
+): string[] {
+  const languages: string[] = [];
+
+  output.split("\n").forEach((line) => {
+    const match = /^([A-Za-z][\w-]*)\s+.+\bvtt\b/.exec(line.trim());
+    if (!match) {
+      return;
+    }
+
+    const language = match[1];
+    if (
+      isAcceptedSubtitleLanguage(language, acceptedLanguages) &&
+      !languages.includes(language)
+    ) {
+      languages.push(language);
+    }
+  });
+
+  return prioritizeSubtitleLanguages(languages, acceptedLanguages);
 }
 
 export function parseSupportedUrl(url: string): URL {
@@ -185,43 +312,77 @@ export function stripVttNonContent(vttContent: string): string {
   return uniqueLines.join("\n");
 }
 
-async function runServer(): Promise<void> {
-  const server = createServer();
+async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
-async function downloadSubtitlesFromYoutube(
+async function downloadSubtitles(
   url: URL,
-  tempDir: string
+  tempDir: string,
+  languages: string[]
 ): Promise<void> {
-  try {
-    await downloadSubtitlesForLanguage(
-      url,
-      tempDir,
-      PREFERRED_SUBTITLE_LANGUAGE
-    );
-  } catch {
-    // A missing English caption track may surface as a yt-dlp failure; fall
-    // through to the availability check so other languages still get a chance.
+  let lastError: unknown;
+  const attemptedLanguages = new Set<string>();
+
+  for (const language of languages) {
+    attemptedLanguages.add(language);
+
+    try {
+      await downloadSubtitlesForLanguage(url, tempDir, language, languages);
+    } catch (error) {
+      lastError = new Error(
+        `Unable to download subtitles for ${language}: ${formatErrorReason(error)}`
+      );
+    }
+
+    if (listVttFiles(tempDir).length > 0) {
+      return;
+    }
   }
 
-  if (listVttFiles(tempDir).length > 0) {
-    return;
+  const fallbackLanguages = (
+    await listAvailableSubtitleLanguages(url, languages)
+  ).filter((language) => !attemptedLanguages.has(language));
+
+  for (const language of fallbackLanguages) {
+    try {
+      await downloadSubtitlesForLanguage(url, tempDir, language, languages);
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (listVttFiles(tempDir).length > 0) {
+      return;
+    }
   }
 
-  await downloadSubtitlesForLanguage(url, tempDir, FALLBACK_SUBTITLE_LANGUAGE);
+  if (lastError) {
+    throw lastError;
+  }
+
+  throw new Error("No subtitles found");
 }
 
 async function downloadSubtitlesForLanguage(
   url: URL,
   tempDir: string,
-  language: string
+  language: string,
+  acceptedLanguages: string[]
 ): Promise<void> {
-  await spawnPromise("yt-dlp", buildYtDlpSubtitleArgs(url, language), {
-    cwd: tempDir,
-    detached: true,
-  });
+  try {
+    await spawnPromise("yt-dlp", buildYtDlpSubtitleArgs(url, language), {
+      cwd: tempDir,
+      detached: true,
+    });
+  } catch {
+    await downloadSubtitlesFromMetadata(
+      url,
+      tempDir,
+      language,
+      acceptedLanguages
+    );
+  }
 }
 
 function listVttFiles(tempDir: string): string[] {
@@ -231,22 +392,116 @@ function listVttFiles(tempDir: string): string[] {
     .sort();
 }
 
-if (isMainModule(process.argv[1])) {
-  runServer().catch(console.error);
+async function listAvailableSubtitleLanguages(
+  url: URL,
+  acceptedLanguages: string[]
+): Promise<string[]> {
+  const output = await spawnPromise("yt-dlp", buildYtDlpListSubtitlesArgs(url), {
+    detached: true,
+  });
+
+  return parseAvailableSubtitleLanguages(output, acceptedLanguages);
 }
 
-function isMainModule(entryPoint: string | undefined): boolean {
-  if (!entryPoint) {
-    return false;
+async function downloadSubtitlesFromMetadata(
+  url: URL,
+  tempDir: string,
+  language: string,
+  acceptedLanguages: string[]
+): Promise<void> {
+  const output = await spawnPromise(
+    "yt-dlp",
+    buildYtDlpRequestedSubtitlesArgs(url, language),
+    { detached: true }
+  );
+  const subtitles = parseRequestedSubtitles(output);
+
+  for (const [subtitleLanguage, subtitle] of Object.entries(subtitles)) {
+    if (
+      !subtitle.url ||
+      !isAcceptedSubtitleLanguage(subtitleLanguage, acceptedLanguages)
+    ) {
+      continue;
+    }
+
+    const response = await fetch(subtitle.url);
+    if (!response.ok) {
+      throw new Error(
+        `Unable to download subtitles for ${subtitleLanguage}: ${response.status}`
+      );
+    }
+
+    const extension = subtitle.ext === "vtt" ? subtitle.ext : "vtt";
+    const fileName = `subtitle.${sanitizeFileName(subtitleLanguage)}.${extension}`;
+    fs.writeFileSync(path.join(tempDir, fileName), await response.text());
   }
 
-  if (import.meta.url === pathToFileURL(entryPoint).href) {
-    return true;
+  if (listVttFiles(tempDir).length === 0) {
+    throw new Error(`No VTT subtitles found for ${language}`);
+  }
+}
+
+function parseRequestedSubtitles(output: string): Record<string, RequestedSubtitle> {
+  const jsonLine = output
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("{"));
+
+  if (!jsonLine) {
+    return {};
   }
 
-  try {
-    return import.meta.url === pathToFileURL(fs.realpathSync(entryPoint)).href;
-  } catch {
-    return false;
+  return JSON.parse(jsonLine) as Record<string, RequestedSubtitle>;
+}
+
+function prioritizeSubtitleLanguages(
+  languages: string[],
+  acceptedLanguages: string[]
+): string[] {
+  const exactMatches = acceptedLanguages.filter((language) =>
+    languages.includes(language)
+  );
+  const variantMatches = languages.filter(
+    (language) =>
+      !exactMatches.includes(language) &&
+      isAcceptedSubtitleLanguage(language, acceptedLanguages)
+  );
+
+  return [...exactMatches, ...variantMatches];
+}
+
+function sanitizeFileName(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]/g, "_");
+}
+
+function isMainModule(): boolean {
+  return process.argv[1] === fileURLToPath(import.meta.url);
+}
+
+function textErrorResponse(text: string) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text,
+      },
+    ],
+    isError: true,
+  };
+}
+
+function formatErrorReason(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
   }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return "unknown error";
+}
+
+if (isMainModule()) {
+  runServer().catch(console.error);
 }

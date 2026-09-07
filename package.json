@@ -1,13 +1,13 @@
 {
   "name": "@anaisbetts/mcp-youtube",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "bin": {
     "mcp-youtube": "dist/index.js"
   },
   "description": "YouTube downloader for MCP",
   "main": "dist/index.js",
   "scripts": {
-    "prepublish": "git clean -xdf dist && bun build --target node src/index.ts --outdir dist",
+    "prepare": "git clean -xdf dist && bun build --target node src/index.ts --outdir dist",
     "test": "bun test"
   },
   "author": "Ani Betts <anais@anaisbetts.org>",
@@ -15,7 +15,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^0.6.0",
     "rimraf": "^6.0.1",
-    "spawn-rx": "^4.0.0"
+    "spawn-rx": "^4.0.0",
+    "subtitle": "^4.2.2"
   },
   "devDependencies": {
     "shx": "^0.3.4",

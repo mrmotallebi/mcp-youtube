@@ -10,16 +10,23 @@ import {
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import { spawnPromise } from "spawn-rx";
 import { rimraf } from "rimraf";
+import { parseSync } from "subtitle";
 
 const SUPPORTED_PROTOCOLS = new Set(["http:", "https:"]);
-const PREFERRED_SUBTITLE_LANGUAGE = "en";
+const DEFAULT_SUBTITLE_LANGUAGES = ["en"];
+const VTT_TAG = /<[^>]+>/g;
 
 interface RequestedSubtitle {
   ext?: string;
   url?: string;
+}
+
+interface DownloadYoutubeUrlArguments {
+  url: string;
+  languages: string[];
 }
 
 const server = new Server(
@@ -45,6 +52,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           type: "object",
           properties: {
             url: { type: "string", description: "URL of the YouTube video" },
+            languages: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                'Accepted subtitle language codes (e.g. ["en", "es"]). Languages not in this list are ignored. Defaults to ["en"].',
+            },
           },
           required: ["url"],
         },
@@ -58,24 +71,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     throw new Error(`Unknown tool: ${request.params.name}`);
   }
 
-  const url = getUrlArgument(request.params.arguments);
-  if (!url) {
-    return textErrorResponse(
-      "Parameters are formatted incorrectly: expected a string url argument"
-    );
-  }
-
-  let parsedUrl: URL;
   try {
-    parsedUrl = parseSupportedUrl(url);
-  } catch (error) {
-    return textErrorResponse(
-      `Parameters are formatted incorrectly: ${formatErrorReason(error)}`
+    const toolArguments = parseDownloadYoutubeUrlArguments(
+      request.params.arguments
     );
-  }
+    const parsedUrl = parseSupportedUrl(toolArguments.url);
+    const content = await downloadYoutubeSubtitles(
+      parsedUrl,
+      toolArguments.languages
+    );
 
-  try {
-    const content = await downloadYoutubeSubtitles(parsedUrl);
     return {
       content: [
         {
@@ -85,17 +90,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ],
     };
   } catch (error) {
-    return textErrorResponse(
-      `Error downloading video: ${formatErrorReason(error)}`
-    );
+    return textErrorResponse(formatErrorReason(error));
   }
 });
 
-export async function downloadYoutubeSubtitles(url: URL): Promise<string> {
+export async function downloadYoutubeSubtitles(
+  url: URL,
+  languages: string[] = DEFAULT_SUBTITLE_LANGUAGES
+): Promise<string> {
+  const acceptedLanguages = normalizeSubtitleLanguages(languages);
   let content = "";
   const tempDir = fs.mkdtempSync(`${os.tmpdir()}${path.sep}youtube-`);
   try {
-    await downloadSubtitles(url, tempDir);
+    await downloadSubtitles(url, tempDir, acceptedLanguages);
 
     listVttFiles(tempDir).forEach((file) => {
       const fileContent = fs.readFileSync(path.join(tempDir, file), "utf8");
@@ -107,6 +114,63 @@ export async function downloadYoutubeSubtitles(url: URL): Promise<string> {
   }
 
   return content;
+}
+
+export function normalizeSubtitleLanguages(languages: string[]): string[] {
+  const normalized = languages
+    .map((language) => language.trim())
+    .filter((language) => language.length > 0);
+
+  if (normalized.length === 0) {
+    return [...DEFAULT_SUBTITLE_LANGUAGES];
+  }
+
+  return [...new Set(normalized)];
+}
+
+export function isAcceptedSubtitleLanguage(
+  language: string,
+  acceptedLanguages: string[]
+): boolean {
+  return acceptedLanguages.some(
+    (accepted) => language === accepted || language.startsWith(`${accepted}-`)
+  );
+}
+
+export function parseDownloadYoutubeUrlArguments(
+  arguments_: unknown
+): DownloadYoutubeUrlArguments {
+  if (!arguments_ || typeof arguments_ !== "object") {
+    throw new Error("expected a string url argument");
+  }
+
+  if (!("url" in arguments_) || typeof arguments_.url !== "string") {
+    throw new Error("expected a string url argument");
+  }
+
+  if (!("languages" in arguments_) || arguments_.languages === undefined) {
+    return {
+      url: arguments_.url,
+      languages: [...DEFAULT_SUBTITLE_LANGUAGES],
+    };
+  }
+
+  if (!Array.isArray(arguments_.languages)) {
+    throw new Error("languages must be an array of language codes");
+  }
+
+  if (
+    arguments_.languages.some(
+      (language) => typeof language !== "string" || language.trim() === ""
+    )
+  ) {
+    throw new Error("languages must be an array of non-empty strings");
+  }
+
+  return {
+    url: arguments_.url,
+    languages: normalizeSubtitleLanguages(arguments_.languages),
+  };
 }
 
 export function buildYtDlpSubtitleArgs(url: URL, language: string): string[] {
@@ -146,7 +210,10 @@ export function buildYtDlpListSubtitlesArgs(url: URL): string[] {
   return ["--list-subs", "--skip-download", "--", url.toString()];
 }
 
-export function parseAvailableSubtitleLanguages(output: string): string[] {
+export function parseAvailableSubtitleLanguages(
+  output: string,
+  acceptedLanguages: string[] = DEFAULT_SUBTITLE_LANGUAGES
+): string[] {
   const languages: string[] = [];
 
   output.split("\n").forEach((line) => {
@@ -156,12 +223,15 @@ export function parseAvailableSubtitleLanguages(output: string): string[] {
     }
 
     const language = match[1];
-    if (!languages.includes(language)) {
+    if (
+      isAcceptedSubtitleLanguage(language, acceptedLanguages) &&
+      !languages.includes(language)
+    ) {
       languages.push(language);
     }
   });
 
-  return prioritizeSubtitleLanguages(languages);
+  return prioritizeSubtitleLanguages(languages, acceptedLanguages);
 }
 
 export function parseSupportedUrl(url: string): URL {
@@ -174,92 +244,40 @@ export function parseSupportedUrl(url: string): URL {
   return parsedUrl;
 }
 
-/**
- * Strips non-content elements from VTT subtitle files
- */
-export function stripVttNonContent(vttContent: string): string {
-  if (!vttContent || vttContent.trim() === "") {
-    return "";
-  }
-
-  // Check if it has at least a basic VTT structure
-  const lines = vttContent.split("\n");
-  if (lines.length < 4 || !lines[0].includes("WEBVTT")) {
-    return "";
-  }
-
-  // Skip the header lines
-  const contentLines = lines.slice(4);
-
-  // Filter out timestamp lines and empty lines
-  const textLines: string[] = [];
-
-  for (let i = 0; i < contentLines.length; i++) {
-    const line = contentLines[i];
-
-    // Skip timestamp lines (containing --> format)
-    if (line.includes("-->")) continue;
-
-    // Skip positioning metadata lines
-    if (line.includes("align:") || line.includes("position:")) continue;
-
-    // Skip empty lines
-    if (line.trim() === "") continue;
-
-    // Clean up the line by removing timestamp tags like <00:00:07.759>
-    const cleanedLine = line
-      .replace(/<\d{2}:\d{2}:\d{2}\.\d{3}>|<\/c>/g, "")
-      .replace(/<c>/g, "");
-
-    if (cleanedLine.trim() !== "") {
-      textLines.push(cleanedLine.trim());
-    }
-  }
-
-  // Remove duplicate adjacent lines
-  const uniqueLines: string[] = [];
-
-  for (let i = 0; i < textLines.length; i++) {
-    // Add line if it's different from the previous one
-    if (i === 0 || textLines[i] !== textLines[i - 1]) {
-      uniqueLines.push(textLines[i]);
-    }
-  }
-
-  return uniqueLines.join("\n");
-}
-
 async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
-async function downloadSubtitles(url: URL, tempDir: string): Promise<void> {
+async function downloadSubtitles(
+  url: URL,
+  tempDir: string,
+  languages: string[]
+): Promise<void> {
   let lastError: unknown;
+  const attemptedLanguages = new Set<string>();
 
-  try {
-    await downloadSubtitlesForLanguage(
-      url,
-      tempDir,
-      PREFERRED_SUBTITLE_LANGUAGE
-    );
-  } catch (error) {
-    lastError = new Error(
-      `Unable to download preferred subtitles: ${formatErrorReason(error)}`
-    );
-  }
+  for (const language of languages) {
+    attemptedLanguages.add(language);
 
-  if (listVttFiles(tempDir).length > 0) {
-    return;
+    try {
+      await downloadSubtitlesForLanguage(url, tempDir, language, languages);
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (listVttFiles(tempDir).length > 0) {
+      return;
+    }
   }
 
   const fallbackLanguages = (
-    await listAvailableSubtitleLanguages(url)
-  ).filter((language) => language !== PREFERRED_SUBTITLE_LANGUAGE);
+    await listAvailableSubtitleLanguages(url, languages)
+  ).filter((language) => !attemptedLanguages.has(language));
 
   for (const language of fallbackLanguages) {
     try {
-      await downloadSubtitlesForLanguage(url, tempDir, language);
+      await downloadSubtitlesForLanguage(url, tempDir, language, languages);
     } catch (error) {
       lastError = error;
     }
@@ -279,7 +297,8 @@ async function downloadSubtitles(url: URL, tempDir: string): Promise<void> {
 async function downloadSubtitlesForLanguage(
   url: URL,
   tempDir: string,
-  language: string
+  language: string,
+  acceptedLanguages: string[]
 ): Promise<void> {
   try {
     await spawnPromise("yt-dlp", buildYtDlpSubtitleArgs(url, language), {
@@ -287,7 +306,12 @@ async function downloadSubtitlesForLanguage(
       detached: true,
     });
   } catch {
-    await downloadSubtitlesFromMetadata(url, tempDir, language);
+    await downloadSubtitlesFromMetadata(
+      url,
+      tempDir,
+      language,
+      acceptedLanguages
+    );
   }
 }
 
@@ -298,18 +322,22 @@ function listVttFiles(tempDir: string): string[] {
     .sort();
 }
 
-async function listAvailableSubtitleLanguages(url: URL): Promise<string[]> {
+async function listAvailableSubtitleLanguages(
+  url: URL,
+  acceptedLanguages: string[]
+): Promise<string[]> {
   const output = await spawnPromise("yt-dlp", buildYtDlpListSubtitlesArgs(url), {
     detached: true,
   });
 
-  return parseAvailableSubtitleLanguages(output);
+  return parseAvailableSubtitleLanguages(output, acceptedLanguages);
 }
 
 async function downloadSubtitlesFromMetadata(
   url: URL,
   tempDir: string,
-  language: string
+  language: string,
+  acceptedLanguages: string[]
 ): Promise<void> {
   const output = await spawnPromise(
     "yt-dlp",
@@ -319,7 +347,10 @@ async function downloadSubtitlesFromMetadata(
   const subtitles = parseRequestedSubtitles(output);
 
   for (const [subtitleLanguage, subtitle] of Object.entries(subtitles)) {
-    if (!subtitle.url) {
+    if (
+      !subtitle.url ||
+      !isAcceptedSubtitleLanguage(subtitleLanguage, acceptedLanguages)
+    ) {
       continue;
     }
 
@@ -353,40 +384,40 @@ function parseRequestedSubtitles(output: string): Record<string, RequestedSubtit
   return JSON.parse(jsonLine) as Record<string, RequestedSubtitle>;
 }
 
-function prioritizeSubtitleLanguages(languages: string[]): string[] {
-  const preferredLanguages = languages.filter(
-    (language) => language === PREFERRED_SUBTITLE_LANGUAGE
+function prioritizeSubtitleLanguages(
+  languages: string[],
+  acceptedLanguages: string[]
+): string[] {
+  const exactMatches = acceptedLanguages.filter((language) =>
+    languages.includes(language)
   );
-  const originalLanguages = languages.filter((language) =>
-    language.endsWith("-orig")
-  );
-  const remainingLanguages = languages.filter(
+  const variantMatches = languages.filter(
     (language) =>
-      language !== PREFERRED_SUBTITLE_LANGUAGE && !language.endsWith("-orig")
+      !exactMatches.includes(language) &&
+      isAcceptedSubtitleLanguage(language, acceptedLanguages)
   );
 
-  return [...preferredLanguages, ...originalLanguages, ...remainingLanguages];
+  return [...exactMatches, ...variantMatches];
 }
 
 function sanitizeFileName(value: string): string {
   return value.replace(/[^A-Za-z0-9_.-]/g, "_");
 }
 
-function isMainModule(): boolean {
-  return process.argv[1] === fileURLToPath(import.meta.url);
-}
-
-function getUrlArgument(arguments_: unknown): string | undefined {
-  if (
-    !arguments_ ||
-    typeof arguments_ !== "object" ||
-    !("url" in arguments_) ||
-    typeof arguments_.url !== "string"
-  ) {
-    return undefined;
+function isMainModule(entryPoint: string | undefined): boolean {
+  if (!entryPoint) {
+    return false;
   }
 
-  return arguments_.url;
+  if (import.meta.url === pathToFileURL(entryPoint).href) {
+    return true;
+  }
+
+  try {
+    return import.meta.url === pathToFileURL(fs.realpathSync(entryPoint)).href;
+  } catch {
+    return false;
+  }
 }
 
 function textErrorResponse(text: string) {
@@ -413,6 +444,33 @@ function formatErrorReason(error: unknown): string {
   return "unknown error";
 }
 
-if (isMainModule()) {
+export function stripVttNonContent(vttContent: string): string {
+  if (!vttContent || vttContent.trim() === "") {
+    return "";
+  }
+
+  try {
+    return dedupeAdjacent(
+      parseSync(vttContent).flatMap((node) =>
+        node.type === "cue" ? cueTextLines(node.data.text) : []
+      )
+    ).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+function cueTextLines(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.replace(VTT_TAG, "").trim())
+    .filter((line) => line.length > 0);
+}
+
+function dedupeAdjacent(lines: string[]): string[] {
+  return lines.filter((line, index) => index === 0 || line !== lines[index - 1]);
+}
+
+if (isMainModule(process.argv[1])) {
   runServer().catch(console.error);
 }
